@@ -2,10 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-Motor simbólico brutal baseado em grafo S, P, O, T, L, C.
+Motor simbólico brutal, agora com o modelo "Predicado + Roles Nomeados" (SPO evoluído).
 
 - Conhecimento vem de banco.json (lista de fatos e regras).
-- Representação única: tudo é conceito, fatos ligam com S, P, O, T, L, C, peso w.
+- Forma preferida de fato:
+    fact = {
+        "predicate": str,
+        "roles": { role_name: value },
+        "weight": number,
+        "context": [tags]
+    }
+  SPO vira caso especial: predicate=P, roles={"s": S, "o": O}. T/L/C/tempo viram apenas roles nomeados.
+- Compatibilidade: ainda aceitamos "S"/"P"/"O" nos dados e derivamos roles automaticamente.
 - Motorzão único: BrutalEngine.explain(goal)
     * goal = {"S": ..., "P": ..., "O": ..., "T": ..., "L": ..., "C": ...}
       (None = coringa / wildcard, strings começando com "?" = variáveis)
@@ -57,29 +65,63 @@ class KnowledgeBase:
         # regras declarativas
         self.rules: List[Dict[str, Any]] = []
 
-    def add_fact(
-        self,
-        S: Any,
-        P: Any,
-        O: Any,
-        T: Any = None,
-        L: Any = None,
-        C: Any = None,
-        w: float = 1.0,
-    ):
-        fact = {
-            "S": S,
-            "P": P,
-            "O": O,
-            "T": T,
-            "L": L,
-            "C": C,
-            "w": float(w),
-            "source": "kb",
+    @staticmethod
+    def _normalize_fact_shape(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Normaliza um fato (novo modelo ou S/P/O legados) para o formato interno."""
+
+        if raw is None:
+            return None
+
+        # novo modelo: predicate + roles nomeados
+        if raw.get("predicate") is not None:
+            predicate = raw.get("predicate")
+            roles = dict(raw.get("roles") or {})
+            context = list(raw.get("context") or [])
+            weight = float(raw.get("weight", raw.get("w", 1.0)))
+        else:
+            # modo legado SPO(TLC)
+            predicate = raw.get("P")
+            roles = {}
+            if "S" in raw:
+                roles["s"] = raw.get("S")
+            if "O" in raw:
+                roles["o"] = raw.get("O")
+            if "T" in raw:
+                roles["t"] = raw.get("T")
+            if "L" in raw:
+                roles["l"] = raw.get("L")
+            if "C" in raw:
+                roles["c"] = raw.get("C")
+            context = list(raw.get("context") or [])
+            weight = float(raw.get("w", 1.0))
+
+        normalized = {
+            "predicate": predicate,
+            "roles": roles,
+            "context": context,
+            "w": weight,
+            "source": raw.get("source", "kb"),
         }
+
+        # campos derivativos para compatibilidade com o motor legado
+        normalized["S"] = roles.get("s")
+        normalized["P"] = predicate
+        normalized["O"] = roles.get("o")
+        normalized["T"] = roles.get("t")
+        normalized["L"] = roles.get("l")
+        normalized["C"] = roles.get("c")
+
+        return normalized
+
+    def add_fact(self, fact: Dict[str, Any]):
+        fact = dict(fact)
         self.facts.append(fact)
 
         # índices simples
+        S = fact.get("S")
+        P = fact.get("P")
+        O = fact.get("O")
+
         self.by_s[S].append(fact)
         self.by_p[P].append(fact)
 
@@ -116,10 +158,21 @@ class KnowledgeBase:
         for raw in data:
             # entrada de REGRA
             if raw.get("rule") is True:
-                head = raw.get("head")
-                body = raw.get("body")
-                if not isinstance(head, dict) or not isinstance(body, list):
+                head_raw = raw.get("head")
+                body_raw = raw.get("body")
+                if not isinstance(head_raw, dict) or not isinstance(body_raw, list):
                     continue
+
+                head = self._normalize_fact_shape(head_raw)
+                body: List[Dict[str, Any]] = []
+                for clause in body_raw:
+                    norm_clause = self._normalize_fact_shape(clause)
+                    if norm_clause and norm_clause.get("predicate") is not None:
+                        body.append(norm_clause)
+
+                if not head or head.get("predicate") is None or not body:
+                    continue
+
                 nome = raw.get("name") or f"regra_{len(self.rules)+1}"
                 w = float(raw.get("w", 1.0))
                 self.rules.append(
@@ -132,17 +185,11 @@ class KnowledgeBase:
                 )
                 continue
 
-            # FATO normal
-            S = raw.get("S")
-            P = raw.get("P")
-            O = raw.get("O")
-            if S is None or P is None:
+            # FATO normal (novo modelo ou SPO legado)
+            fact = self._normalize_fact_shape(raw)
+            if not fact or fact.get("predicate") is None:
                 continue
-            T = raw.get("T")
-            L = raw.get("L")
-            C = raw.get("C")
-            w = raw.get("w", 1.0)
-            self.add_fact(S, P, O, T=T, L=L, C=C, w=w)
+            self.add_fact(fact)
 
 
 # ---------------------------------------------------------
